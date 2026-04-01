@@ -1,0 +1,16 @@
+services:
+  bot:
+    build: .
+    env_file: .env
+    volumes:
+      # Agent runtime dirs — persisted on host so data survives container restarts/rebuilds
+      - ./agent_tools:/app/agent_tools
+      - ./agent_mcp:/app/agent_mcp
+      - ./agent_context:/app/agent_context
+      - ./agent_tmp:/app/agent_tmp
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"

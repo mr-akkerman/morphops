@@ -205,3 +205,9 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Agent runtime directories (created on startup, contain user data & secrets)
+agent_tools/
+agent_mcp/
+agent_context/
+agent_tmp/
