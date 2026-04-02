@@ -1,10 +1,15 @@
 """Telegram transport layer.
 
 Formats AgentStep objects into Telegram messages and handles sending them.
+
+LiveMessage — the main abstraction for streaming responses:
+  - Private chats: uses sendMessageDraft (Bot API 9.5 native streaming)
+  - Group chats: sends one message then edits it on every update
 All public functions are thin async wrappers — no business logic here.
 """
 from __future__ import annotations
 
+import time
 import config
 from telegram import Bot
 from telegram.constants import ChatAction
@@ -97,41 +102,133 @@ def _split_text(text: str, limit: int = _TG_MAX_LEN) -> list[str]:
     return chunks
 
 
-async def send_step(bot: Bot, chat_id: int, step: AgentStep) -> None:
-    """Send one intermediate reasoning step.
+class LiveMessage:
+    """A single Telegram message that is replaced on every agent step.
+
+    Each call to append() overwrites the previous content — the user always sees
+    only the current step, not an accumulation of all previous ones.
+    At the end, finalize() replaces the step with the final answer.
+
+    Private chats: uses sendMessageDraft (Bot API 9.5) — animated typing bubble
+    that gets replaced each step. finalize() sends a permanent message and the
+    draft disappears automatically.
+
+    Group chats: sends one message then edits it (same message_id) on every step.
+    finalize() edits in-place with the final answer.
+    """
+
+    def __init__(self, bot: Bot, chat_id: int, is_private: bool) -> None:
+        self._bot = bot
+        self._chat_id = chat_id
+        self._is_private = is_private
+        # draft_id must be non-zero; monotonic ms gives a unique value per session
+        self._draft_id: int = (int(time.monotonic() * 1000) % 0x7FFFFFFF) or 1
+        self._message_id: int | None = None
+
+    async def append(self, text: str) -> None:
+        """Replace the live message with new content (current step only)."""
+        await self._push(text[:_TG_MAX_LEN] if len(text) > _TG_MAX_LEN else text)
+
+    async def finalize(self, final_text: str) -> None:
+        """Replace live content with the final answer.
+
+        Private: sends a permanent message (draft bubble disappears automatically).
+        Group: edits the existing live message in-place. If no intermediate steps
+        were shown yet, falls back to sending a new message.
+        """
+        full = f"📋 {_sanitize(final_text)}"
+        chunks = _split_text(full)
+
+        if self._is_private:
+            for chunk in chunks:
+                try:
+                    await self._bot.send_message(
+                        chat_id=self._chat_id, text=chunk, parse_mode="Markdown"
+                    )
+                except TelegramError:
+                    try:
+                        await self._bot.send_message(chat_id=self._chat_id, text=chunk)
+                    except TelegramError as exc:
+                        logger.error("finalize_send_failed", error=str(exc))
+        else:
+            first, *rest = chunks
+            if self._message_id is not None:
+                try:
+                    await self._bot.edit_message_text(
+                        chat_id=self._chat_id,
+                        message_id=self._message_id,
+                        text=first,
+                        parse_mode="Markdown",
+                    )
+                except TelegramError:
+                    try:
+                        await self._bot.edit_message_text(
+                            chat_id=self._chat_id,
+                            message_id=self._message_id,
+                            text=first,
+                        )
+                    except TelegramError as exc:
+                        logger.error("finalize_edit_failed", error=str(exc))
+                for chunk in rest:
+                    try:
+                        await self._bot.send_message(chat_id=self._chat_id, text=chunk)
+                    except TelegramError as exc:
+                        logger.error("finalize_overflow_failed", error=str(exc))
+            else:
+                for chunk in chunks:
+                    try:
+                        await self._bot.send_message(
+                            chat_id=self._chat_id, text=chunk, parse_mode="Markdown"
+                        )
+                    except TelegramError:
+                        try:
+                            await self._bot.send_message(chat_id=self._chat_id, text=chunk)
+                        except TelegramError as exc:
+                            logger.error("finalize_send_failed", error=str(exc))
+
+    async def _push(self, text: str) -> None:
+        """Push text to Telegram, replacing the previous content entirely."""
+        if self._is_private:
+            try:
+                await self._bot.send_message_draft(
+                    chat_id=self._chat_id,
+                    draft_id=self._draft_id,
+                    text=text,
+                )
+            except TelegramError as exc:
+                logger.error("live_draft_failed", error=str(exc))
+        else:
+            if self._message_id is None:
+                try:
+                    msg = await self._bot.send_message(
+                        chat_id=self._chat_id, text=text
+                    )
+                    self._message_id = msg.message_id
+                except TelegramError as exc:
+                    logger.error("live_send_failed", error=str(exc))
+            else:
+                try:
+                    await self._bot.edit_message_text(
+                        chat_id=self._chat_id,
+                        message_id=self._message_id,
+                        text=text,
+                    )
+                except TelegramError as exc:
+                    logger.warning("live_edit_failed", error=str(exc))
+
+
+async def send_step(live: LiveMessage, step: AgentStep) -> None:
+    """Replace the live message with the current reasoning step.
 
     Called twice per tool use:
-    - Before execution (step.observation is None): sends thought + tool announcement
-    - After execution (step.observation is set): sends tool result
+    - Before execution (step.observation is None): thought + tool announcement
+    - After execution (step.observation is set): tool result
     """
-    if not step.observation:  # None or "" — pre-execution phase
+    if not step.observation:
         text = _sanitize(_format_pre_step(step))
     else:
         text = _sanitize(_format_observation(step.observation))
-
-    for chunk in _split_text(text):
-        try:
-            await bot.send_message(chat_id=chat_id, text=chunk)
-        except TelegramError as exc:
-            logger.error("send_step_failed", chat_id=chat_id, error=str(exc))
-
-
-async def send_final(bot: Bot, chat_id: int, text: str) -> None:
-    """Send the agent's final answer.
-
-    Tries Markdown formatting first; falls back to plain text if Telegram
-    rejects the message (e.g. unbalanced markdown symbols).
-    """
-    full = f"📋 {_sanitize(text)}"
-    for chunk in _split_text(full):
-        try:
-            await bot.send_message(chat_id=chat_id, text=chunk, parse_mode="Markdown")
-        except TelegramError:
-            # Markdown parse error — send without formatting
-            try:
-                await bot.send_message(chat_id=chat_id, text=chunk)
-            except TelegramError as exc:
-                logger.error("send_final_failed", chat_id=chat_id, error=str(exc))
+    await live.append(text)
 
 
 async def send_typing(bot: Bot, chat_id: int) -> None:
