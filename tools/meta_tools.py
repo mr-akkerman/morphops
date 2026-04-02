@@ -100,6 +100,12 @@ class _DangerChecker(ast.NodeVisitor):
         "fork", "kill", "killpg",
     })
 
+    # asyncio subprocess launchers — equivalent to subprocess, must be blocked
+    _BLOCKED_ASYNCIO_SUBPROCESS = frozenset({
+        "create_subprocess_exec",
+        "create_subprocess_shell",
+    })
+
     def __init__(self) -> None:
         self.errors: list[str] = []
 
@@ -140,6 +146,17 @@ class _DangerChecker(ast.NodeVisitor):
             and node.func.attr in self._BLOCKED_OS_ATTRS
         ):
             self.errors.append(f"Запрещённый вызов: os.{node.func.attr}()")
+
+        # asyncio.create_subprocess_exec / asyncio.create_subprocess_shell
+        # These are equivalent to subprocess and bypass the subprocess block.
+        if (
+            isinstance(node.func, ast.Attribute)
+            and node.func.attr in self._BLOCKED_ASYNCIO_SUBPROCESS
+        ):
+            self.errors.append(
+                f"Запрещённый вызов: asyncio.{node.func.attr}() — "
+                "используй встроенные инструменты ssh_exec / http_get вместо запуска подпроцессов"
+            )
 
         # open(...) — block entirely (both read and write) to prevent file exfiltration
         if isinstance(node.func, ast.Name) and node.func.id == "open":
