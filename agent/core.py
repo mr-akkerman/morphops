@@ -15,6 +15,7 @@ from agent.tool_registry import ToolRegistry
 import tools.meta_tools as meta_tools
 import tools.db_tools as db_tools
 import tools.api_tools as api_tools
+import tools.ssh_tools as ssh_tools
 
 logger = structlog.get_logger()
 
@@ -27,6 +28,9 @@ _BASE_SYSTEM_PROMPT = """\
 - Создавать свои инструменты (Python-функции) и сохранять их через write_tool
 - Подключаться к базам данных по схеме и credentials, генерировать SQL-инструменты
 - Работать с внешними API по документации, генерировать HTTP-инструменты
+- Управлять удалёнными серверами по SSH через встроенные инструменты ssh_exec и \
+ssh_upload_file (credentials задаются через save_env_var: SSH_HOST, SSH_USER, \
+SSH_PASS, SSH_PORT, SSH_KEY)
 - Устанавливать и использовать MCP-серверы
 
 Если тебе нужен инструмент, которого нет — напиши его сам и зарегистрируй.
@@ -121,6 +125,13 @@ class AdminAgent:
             api_tools.http_post,
             api_tools.http_patch,
             api_tools.http_delete,
+        ):
+            self.registry.register_function(fn)
+
+        # ── Stage 6b: ssh-tools ──
+        for fn in (
+            ssh_tools.ssh_exec,
+            ssh_tools.ssh_upload_file,
         ):
             self.registry.register_function(fn)
 

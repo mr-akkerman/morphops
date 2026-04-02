@@ -12,6 +12,7 @@ dependencies = [
     "python-dotenv",
     "pydantic>=2.0",
     "structlog",
+    "paramiko>=3.0",
 ]
 
 [build-system]

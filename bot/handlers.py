@@ -12,12 +12,13 @@ from collections import deque
 import structlog
 from pathlib import Path
 from telegram import Update
+from telegram.constants import ChatType
 from telegram.ext import ContextTypes
 
 import config
 from agent.confirmation import confirmation_manager
 from bot.confirmation import make_confirm_callback, resolve_pending
-from bot.telegram_transport import send_error, send_final, send_step, send_typing
+from bot.telegram_transport import LiveMessage, send_error, send_step, send_typing
 
 logger = structlog.get_logger()
 
@@ -172,11 +173,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     try:
         await send_typing(bot, chat_id)
 
+        is_private = update.effective_chat.type == ChatType.PRIVATE
+        live = LiveMessage(bot, chat_id, is_private)
+
         async def step_callback(step):
-            await send_step(bot, chat_id, step)
+            await send_step(live, step)
 
         final = await _agent.handle_message(text, step_callback)
-        await send_final(bot, chat_id, final)
+        await live.finalize(final)
 
     except Exception as exc:
         logger.error("handler_error", user_id=user_id, error=str(exc), exc_info=True)
@@ -241,11 +245,14 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     _currently_processing.add(user_id)
     confirmation_manager.set_callback(make_confirm_callback(bot, chat_id))
     try:
+        is_private = update.effective_chat.type == ChatType.PRIVATE
+        live = LiveMessage(bot, chat_id, is_private)
+
         async def step_callback(step):
-            await send_step(bot, chat_id, step)
+            await send_step(live, step)
 
         final = await _agent.handle_message(agent_text, step_callback)
-        await send_final(bot, chat_id, final)
+        await live.finalize(final)
 
     except Exception as exc:
         logger.error("document_handler_error", user_id=user_id, error=str(exc), exc_info=True)
